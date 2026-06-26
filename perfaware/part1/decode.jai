@@ -1,5 +1,5 @@
 
-register_name :: (reg: u8, wide: bool) -> string {
+register_name :: (reg: int, wide: bool) -> string {
     if wide == false {
         if reg == {
             case 0b000; return "al";
@@ -27,7 +27,7 @@ register_name :: (reg: u8, wide: bool) -> string {
     return "???";
 }
 
-effective_address :: (rm: u8) -> string {
+effective_address :: (rm: int) -> string {
     if rm == {
         case 0b000; return "bx + si";
         case 0b001; return "bx + di";
@@ -42,14 +42,46 @@ effective_address :: (rm: u8) -> string {
     return "???";
 }
 
+sign_extend_s8 :: (value: *int) {
+    x := cast,no_check(s8, value.*);
+    value.* = x; // conversion back to int should sign extend for us
+}
+
+pull_displacement :: (instructions: *[]u8, mod: int, rm: int) -> displacement: int {
+    if mod == {
+    case 0b00;
+        if rm == 0b110 {
+            return next2(instructions);
+        }
+        return 0;
+    case 0b01;
+        displacement: int = next(instructions, true);
+        return displacement;
+    case 0b10;
+        displacement: int = next2(instructions);
+        return displacement;
+    case 0b11;
+        return 0;
+    }
+    assert(false, "Invalid mod");
+    return 0;
+}
+
 advance :: (view: *[]u8, count := 1) {
     view.* = array_view(view.*, count);
 }
 
-next :: (view: *[]u8) -> u8 {
-    value := view.*[0];
+next :: (view: *[]u8, signed: bool = false) -> int {
+    value : int = view.*[0];
     advance(view, 1);
+    if signed sign_extend_s8(*value);
     return value;
+}
+
+next2 :: (view: *[]u8) -> int {
+    d1 := next(view);
+    d2 := next(view);
+    return d1 + (d2 << 8);
 }
 
 decode_op :: (instructions: *[]u8) -> ok: bool {
@@ -58,6 +90,7 @@ decode_op :: (instructions: *[]u8) -> ok: bool {
     byte := next(instructions);
     o4 := byte >> 4;
     o6 := byte >> 2;
+    o7 := byte >> 1;
 
     if o4 == {
         case 0b1011; // immediate to register
@@ -72,7 +105,7 @@ decode_op :: (instructions: *[]u8) -> ok: bool {
     }
 
     if o6 == {
-    case 0b100010; // Immediate to register/memory
+    case 0b100010; // MOV: Immediate to register/memory
         d := cast(bool, (byte >> 1) & 1); // Direction; 1=destination is the REG field.
         w := cast(bool, byte & 1); // Wide/word if true. Otherwise a byte.
 
@@ -81,45 +114,79 @@ decode_op :: (instructions: *[]u8) -> ok: bool {
         reg := (b2 >> 3) & 0b111;
         mod := (b2 >> 6);
 
-        displacement, d1, d2: int;
+        displacement := pull_displacement(instructions, mod, rm);
         if mod == {
-            case 0b00; // Memory mode, no displacement* (unless rm==0b110)
-                if rm == 0b110 { // DIRECT ADDRESS
-                    d1 = next(instructions);
-                    d2 = next(instructions);
-                    direct_address := d1 + (d2 << 8);
-                    if d {
-                        print("mov %1, [%2]\n", register_name(reg, w), direct_address);
-                    } else {
-                        print("mov [%2], %1\n", register_name(reg, w), direct_address);
-                    }
-                    return true;
-                }
-                #through;
-            case 0b01; #through; // 8 bit displacement
-            case 0b10; // 16 bit displacement
-                if mod >= 0b01 d1 = next(instructions);
-                if mod >= 0b10 d2 = next(instructions);
-                displacement = d1 + (d2 << 8);
+        case 0b00; // Memory mode, no displacement* (unless rm==0b110)
+            if rm == 0b110 { // DIRECT ADDRESS
+                direct_address := displacement;
                 if d {
-                    if displacement {
-                        print("mov %1, [%2 + %3]\n", register_name(reg, w), effective_address(rm), displacement);
-                    } else {
-                        print("mov %1, [%2]\n", register_name(reg, w), effective_address(rm));
-                    }
+                    print("mov %1, [%2]\n", register_name(reg, w), direct_address);
                 } else {
-                    if displacement {
-                        print("mov [%2 + %3], %1\n", register_name(reg, w), effective_address(rm), displacement);
-                    } else {
-                        print("mov [%2], %1\n", register_name(reg, w), effective_address(rm));
-                    }
+                    print("mov [%2], %1\n", register_name(reg, w), direct_address);
                 }
                 return true;
-            case 0b11; // Register mode, no displacement
-             dest, src := ifx d then reg else rm, ifx !d then reg else rm;
-             print("mov %, %\n", register_name(dest, w), register_name(src, w));
-             return true;
+            }
+            #through;
+        case 0b01; #through; // 8 bit displacement
+        case 0b10; // 16 bit displacement
+            sign := ifx displacement < 0 "-" else "+";
+            if d {
+                if displacement {
+                    print("mov %1, [%2 %4 %3]\n", register_name(reg, w), effective_address(rm), abs(displacement), sign);
+                } else {
+                    print("mov %1, [%2]\n", register_name(reg, w), effective_address(rm));
+                }
+            } else {
+                if displacement {
+                    print("mov [%2 %4 %3], %1\n", register_name(reg, w), effective_address(rm), abs(displacement), sign);
+                } else {
+                    print("mov [%2], %1\n", register_name(reg, w), effective_address(rm));
+                }
+            }
+            return true;
+        case 0b11; // Register mode, no displacement
+            dest, src := ifx d then reg else rm, ifx !d then reg else rm;
+            print("mov %, %\n", register_name(dest, w), register_name(src, w));
+            return true;
         }
+    }
+
+    if o7 == {
+    case 0b1100011; // MOV: Immediate to register/memory
+        w := cast(bool, byte & 1);
+        b2 := next(instructions);
+
+        rm := (b2 & 0b111);
+        subcode := (b2 >> 3) & 0b111;
+        mod := (b2 >> 6) & 0b11;
+
+        if subcode == 0b000 {
+            displacement := pull_displacement(instructions, mod, rm);
+            immediate: int = ifx w then next2(instructions) else next(instructions, true);
+
+            size := ifx w then "word" else "byte";
+            if displacement {
+                sign := ifx displacement < 0 "-" else "+";
+                print("mov [% % %], % %\n", effective_address(rm), sign, abs(displacement), size, immediate);
+            } else {
+                print("mov [%], % %\n", effective_address(rm), size, immediate);
+            }
+            return true;
+        } else {
+            log("Unknown subcode %\n", subcode);
+        }
+    case 0b1010000; // MOV: Memory to accumulator
+        w := cast(bool, byte & 1);
+        memory := next2(instructions);
+        destination := ifx w "ax" else "al";
+        print("mov %, [%]\n", destination, memory);
+        return true;
+    case 0b1010001; // MOV: Accumulator to memory
+        w := cast(bool, byte & 1);
+        memory := next2(instructions);
+        destination := ifx w "ax" else "al";
+        print("mov [%], %\n", memory, destination);
+        return true;
     }
 
     print("Unknown op code with 0b%\n", formatInt(byte, base=2, minimum_digits=8));
@@ -156,3 +223,4 @@ main :: () {
 
 #import "Basic";
 #import "File";
+#import "Math";
