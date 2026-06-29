@@ -40,29 +40,36 @@ parse :: (data: string) -> []Pair, ok: bool {
     j: Lexer = json_init(data);
     defer json_free(*j);
 
-    state: enum {
-        NONE;
-        POSITIONS;
-        PAIR;
-    } = .NONE;
+    parse_pair :: (j: *Lexer, pair: *Pair) {
+        level := j.stack.count;
+        t: Token;
+        while json_fetch_next_at_depth(j, *t, level+1) {
+            if t.type == .KEY {
+                destination: *float64;
+                if t.str == {
+                case "x1"; destination = *pair.a.x;
+                case "y1"; destination = *pair.a.y;
+                case "x2"; destination = *pair.b.x;
+                case "y2"; destination = *pair.b.y;
+                }
+                if destination {
+                    key_value := json_next(j);
+                    if key_value.type == .NUMBER {
+                        destination.* = key_value.num;
+                    }
+                }
+            }
+        }
+    }
 
     while true {
         t := json_next(*j);
         if t.type == .NONE break;
-        else if t.type == .KEY && state == .NONE && t.str == "positions" {
-            state = .POSITIONS;
-        } else if t.type == .OBJECT_BEGIN && state == .POSITIONS {
-            state = .PAIR;
-            array_add(*results);
-        } else if t.type == .OBJECT_END && state == .PAIR {
-            state = .POSITIONS;
-        } else if t.type == .NUMBER && state == .PAIR {
-            key_token := j.stack[j.stack.count - 2];
-            if key_token.str == {
-            case "x1"; peek_pointer(results).a.x = t.num;
-            case "x2"; peek_pointer(results).b.x = t.num;
-            case "y1"; peek_pointer(results).a.y = t.num;
-            case "y2"; peek_pointer(results).b.y = t.num;
+        if t.type == .ARRAY_BEGIN {
+            while json_fetch_until(*j, .ARRAY_END, *t) {
+                if t.type == .OBJECT_BEGIN {
+                    parse_pair(*j, array_add(*results));
+                }
             }
         }
     }
@@ -243,6 +250,29 @@ json_next :: (j: *Lexer) -> Token {
     return .{};
 }
 
+json_fetch_until :: (j: *Lexer, type: TokenType, out_token: *Token) -> bool {
+    t := json_next(j);
+    out_token.* = t;
+    if t.type == .NONE return false;
+    if t.type == type  return false;
+    return true;
+}
+
+json_fetch_next_at_depth :: (j: *Lexer, out_token: *Token, level: int) -> bool {
+    t := json_next(j);
+    while j.stack.count >= level {
+        if level == j.stack.count {
+            out_token.* = t;
+            return true;
+        }
+        t = json_next(j);
+    }
+    out_token.* = t;
+    return false;
+}
+
+#scope_file
+
 parse_string :: (str: *string) -> string, ok: bool {
     assert(str.*[0] == #char "\"", tprint("str should start with a \" but it is: %", slice(str.*, 0, 10)));
     i := 1;
@@ -266,8 +296,6 @@ parse_string :: (str: *string) -> string, ok: bool {
     assert(false, "bad fallthrough");
     return "", false;
 }
-
-#scope_file
 
 skip_whitespace :: (_s: string) -> string {
     s := _s;
