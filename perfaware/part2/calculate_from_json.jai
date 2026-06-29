@@ -1,3 +1,41 @@
+// ---------------- Reference calculations
+RADIUS :: 6372.8;
+Square :: (A: float64) -> float64 {
+    Result := A * A;
+    return Result;
+}
+
+RadiansFromDegrees :: (Degrees: float64) -> float64 {
+    Result := 0.01745329251994329577 * Degrees;
+    return Result;
+}
+
+// NOTE(casey): EarthRadius is generally expected to be 6372.8
+ReferenceHaversine :: (X0: float64, Y0: float64, X1: float64, Y1: float64, EarthRadius: float64) -> float64 {
+    /* NOTE(casey): This is not meant to be a "good" way to calculate the Haversine distance.
+       Instead, it attempts to follow, as closely as possible, the formula used in the real-world
+       question on which these homework exercises are loosely based.
+    */
+
+    lat1 := Y0;
+    lat2 := Y1;
+    lon1 := X0;
+    lon2 := X1;
+
+    dLat := RadiansFromDegrees(lat2 - lat1);
+    dLon := RadiansFromDegrees(lon2 - lon1);
+    lat1 = RadiansFromDegrees(lat1);
+    lat2 = RadiansFromDegrees(lat2);
+
+    a := Square(sin(dLat/2.0)) + cos(lat1)*cos(lat2)*Square(sin(dLon/2));
+    c := 2.0*asin(sqrt(a));
+
+    Result := EarthRadius * c;
+
+    return Result;
+}
+// ------------------------
+
 LatLon :: struct {
     x: float64;
     y: float64;
@@ -8,14 +46,15 @@ Pair :: struct {
     b: LatLon;
 };
 
-
 main :: () {
     args := get_command_line_arguments();
 
     input_file: string = "./data_10.json";
+    answers_file: string = "./data_10.answers";
     if args.count > 1 {
         input_file = args[1];
     }
+    answers_file = tprint("%.answers", basename(input_file));
 
     input, ok := read_entire_file(input_file);
     if !ok {
@@ -31,6 +70,41 @@ main :: () {
     }
 
     print("Found pairs: %\n", pairs.count);
+
+    answers_data:, ok= read_entire_file(answers_file);
+    if !ok {
+        log("Failed to read answers file %", answers_file);
+    }
+    answers_f64: []float64;
+    if answers_data {
+        answers_f64.data = xx answers_data.data;
+        answers_f64.count = answers_data.count / size_of(float64);
+        print("Answer count: %\n", answers_f64.count);
+        if answers_f64.count != pairs.count {
+            log_error("Answers has % values, but pairs has %\n", answers_f64.count, pairs.count);
+        }
+    }
+    sum: float64 = 0;
+    count := 0;
+    success_count := 0;
+    for pair : pairs {
+        result := ReferenceHaversine(pair.a.x, pair.a.y, pair.b.x, pair.b.y, RADIUS);
+        sum += result;
+        count += 1;
+
+        if answers_f64.count > it_index {
+            reference := answers_f64[it_index];
+            if values_are_close(reference, result) {
+                success_count += 1;
+            } else {
+                log_error("Reference does not match result for pair %. Should be %, but got %", it_index, reference, result);
+            }
+        }
+    }
+
+    average := sum / count;
+    print("Average: %\n", average);
+    print("Correct: %/%\n", success_count, count);
 }
 
 // Remember to free the result!
@@ -317,3 +391,9 @@ peek_or_default :: (arr: []$T) -> T {
 #import "Basic";
 #import "File";
 #import "String";
+#import "Math";
+
+// Sloppy_Math only supports float, not float64, so implement it here.
+values_are_close :: (f0: float64, f1: float64, epsilon := 0.0005) -> bool {
+    return abs(f0-f1) <= epsilon;
+}
