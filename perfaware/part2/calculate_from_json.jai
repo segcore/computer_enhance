@@ -47,8 +47,11 @@ Pair :: struct {
 };
 
 main :: () {
+    time_begin := current_time_monotonic();
+    begin_main := rdtsc();
     args := get_command_line_arguments();
 
+    begin_args := rdtsc();
     input_file: string = "./data_10.json";
     answers_file: string = "./data_10.answers";
     if args.count > 1 {
@@ -56,12 +59,14 @@ main :: () {
     }
     answers_file = tprint("%.answers", basename(input_file));
 
+    begin_read := rdtsc();
     input, ok := read_entire_file(input_file);
     if !ok {
         log_error("Failed to read input file '%'.\n", input_file);
         exit(1);
     }
 
+    begin_parse := rdtsc();
     pairs:, ok = parse(input);
     defer array_free(pairs);
     if !ok {
@@ -69,8 +74,9 @@ main :: () {
         exit(1);
     }
 
-    print("Found pairs: %\n", pairs.count);
+    // print("Found pairs: %\n", pairs.count);
 
+    begin_read_answers := rdtsc();
     answers_data:, ok= read_entire_file(answers_file);
     if !ok {
         log("Failed to read answers file %", answers_file);
@@ -84,6 +90,8 @@ main :: () {
             log_error("Answers has % values, but pairs has %\n", answers_f64.count, pairs.count);
         }
     }
+
+    begin_haversine_calculations := rdtsc();
     sum: float64 = 0;
     count := 0;
     success_count := 0;
@@ -103,8 +111,36 @@ main :: () {
     }
 
     average := sum / count;
+
+    begin_free := rdtsc();
+    array_reset(*pairs);
+
+    begin_finalise := rdtsc();
+    total_TSC_taken := begin_finalise - begin_main;
+
+    print("----- Calculations -----\n");
     print("Average: %\n", average);
     print("Correct: %/%\n", success_count, count);
+
+    print("----- Timing -----\n");
+    PrintTimeElapsed("Startup", total_TSC_taken, begin_main, begin_args);
+    PrintTimeElapsed("Arguments", total_TSC_taken, begin_args, begin_read);
+    PrintTimeElapsed("Read", total_TSC_taken, begin_read, begin_parse);
+    PrintTimeElapsed("Parse", total_TSC_taken, begin_parse, begin_read_answers);
+    PrintTimeElapsed("Read_answers", total_TSC_taken, begin_read_answers, begin_haversine_calculations);
+    PrintTimeElapsed("Process (haversine)", total_TSC_taken, begin_haversine_calculations, begin_free);
+    PrintTimeElapsed("Free", total_TSC_taken, begin_free, begin_finalise);
+    end := rdtsc();
+    PrintTimeElapsed("Finalise", total_TSC_taken, begin_finalise, end);
+    time_end := current_time_monotonic();
+    time_diff := time_end - time_begin;
+    print("Took % seconds\n", formatFloat(to_float64_seconds(time_end - time_begin)));
+}
+
+PrintTimeElapsed :: (label: string, TotalTSCElapsed: u64, Begin: u64, End: u64) {
+    Elapsed := End - Begin;
+    Percent := 100.0 * (Elapsed.(float64) / TotalTSCElapsed.(float64));
+    print("  %: % (%\%)\n", label, Elapsed, formatFloat(Percent, trailing_width=2));
 }
 
 // Remember to free the result!
@@ -392,6 +428,9 @@ peek_or_default :: (arr: []$T) -> T {
 #import "File";
 #import "String";
 #import "Math";
+
+// Profiling
+#import "Machine_X64";
 
 // Sloppy_Math only supports float, not float64, so implement it here.
 values_are_close :: (f0: float64, f1: float64, epsilon := 0.0005) -> bool {
