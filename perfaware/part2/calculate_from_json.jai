@@ -46,7 +46,10 @@ Pair :: struct {
     b: LatLon;
 };
 
+cpu_frequency: u64;
+
 main :: () {
+    cpu_frequency = estimate_cpu_frequency();
     time_begin := current_time_monotonic();
     begin_main := rdtsc();
     args := get_command_line_arguments();
@@ -123,24 +126,41 @@ main :: () {
     print("Correct: %/%\n", success_count, count);
 
     print("----- Timing -----\n");
-    PrintTimeElapsed("Startup", total_TSC_taken, begin_main, begin_args);
-    PrintTimeElapsed("Arguments", total_TSC_taken, begin_args, begin_read);
-    PrintTimeElapsed("Read", total_TSC_taken, begin_read, begin_parse);
-    PrintTimeElapsed("Parse", total_TSC_taken, begin_parse, begin_read_answers);
-    PrintTimeElapsed("Read_answers", total_TSC_taken, begin_read_answers, begin_haversine_calculations);
-    PrintTimeElapsed("Process (haversine)", total_TSC_taken, begin_haversine_calculations, begin_free);
-    PrintTimeElapsed("Free", total_TSC_taken, begin_free, begin_finalise);
+    print("Estimated CPU frequency: %Hz  (% MHz)\n", cpu_frequency, cpu_frequency/1000_000);
+    PrintTimeElapsed("Startup             ", total_TSC_taken, begin_main, begin_args);
+    PrintTimeElapsed("Arguments           ", total_TSC_taken, begin_args, begin_read);
+    PrintTimeElapsed("Read                ", total_TSC_taken, begin_read, begin_parse);
+    PrintTimeElapsed("Parse               ", total_TSC_taken, begin_parse, begin_read_answers);
+    PrintTimeElapsed("Read_answers        ", total_TSC_taken, begin_read_answers, begin_haversine_calculations);
+    PrintTimeElapsed("Process (haversine) ", total_TSC_taken, begin_haversine_calculations, begin_free);
+    PrintTimeElapsed("Free                ", total_TSC_taken, begin_free, begin_finalise);
     end := rdtsc();
-    PrintTimeElapsed("Finalise", total_TSC_taken, begin_finalise, end);
+    PrintTimeElapsed("Finalise            ", total_TSC_taken, begin_finalise, end);
     time_end := current_time_monotonic();
     time_diff := time_end - time_begin;
-    print("Took % seconds\n", formatFloat(to_float64_seconds(time_end - time_begin)));
+    print("Took % seconds\n", formatFloat(to_float64_seconds(time_end - time_begin), trailing_width=3));
 }
 
 PrintTimeElapsed :: (label: string, TotalTSCElapsed: u64, Begin: u64, End: u64) {
     Elapsed := End - Begin;
     Percent := 100.0 * (Elapsed.(float64) / TotalTSCElapsed.(float64));
-    print("  %: % (%\%)\n", label, Elapsed, formatFloat(Percent, trailing_width=2));
+    Time := 1000.0 * Elapsed.(float64) / cpu_frequency.(float64);
+    print("  % % (%\%) \t%ms\n", label, formatInt(Elapsed, minimum_digits=10, padding=" "), formatFloat(Percent, trailing_width=2), formatFloat(Time, trailing_width=2));
+}
+
+estimate_cpu_frequency :: () -> u64 {
+    start := rdtsc();
+    end: u64;
+    time_begin := current_time_monotonic();
+    time_should_end := time_begin + milliseconds_to_apollo(100);
+    time_end: Apollo_Time;
+    while time_end < time_should_end {
+        time_end = current_time_monotonic();
+        end = rdtsc();
+    }
+    diff_rdtsc := end - start;
+    diff_time := to_float64_seconds(time_end - time_begin);
+    return cast(u64, diff_rdtsc / diff_time);
 }
 
 // Remember to free the result!
