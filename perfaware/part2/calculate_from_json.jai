@@ -46,30 +46,28 @@ Pair :: struct {
     b: LatLon;
 };
 
-cpu_frequency: u64;
-
 main :: () {
-    cpu_frequency = estimate_cpu_frequency();
-    time_begin := current_time_monotonic();
-    begin_main := rdtsc();
-    args := get_command_line_arguments();
+    estimate_cpu_frequency();
+    profile_begin();
 
-    begin_args := rdtsc();
+    profile_block_begin("Args");
+    args := get_command_line_arguments();
     input_file: string = "./data_10.json";
     answers_file: string = "./data_10.answers";
     if args.count > 1 {
         input_file = args[1];
     }
     answers_file = tprint("%.answers", basename(input_file));
+    profile_block_end("Args");
 
-    begin_read := rdtsc();
+    profile_block_begin("Read input");
     input, ok := read_entire_file(input_file);
     if !ok {
         log_error("Failed to read input file '%'.\n", input_file);
         exit(1);
     }
+    profile_block_end("Read input");
 
-    begin_parse := rdtsc();
     pairs:, ok = parse(input);
     defer array_free(pairs);
     if !ok {
@@ -77,9 +75,7 @@ main :: () {
         exit(1);
     }
 
-    // print("Found pairs: %\n", pairs.count);
-
-    begin_read_answers := rdtsc();
+    profile_block_begin("Read answers file");
     answers_data:, ok= read_entire_file(answers_file);
     if !ok {
         log("Failed to read answers file %", answers_file);
@@ -88,13 +84,13 @@ main :: () {
     if answers_data {
         answers_f64.data = xx answers_data.data;
         answers_f64.count = answers_data.count / size_of(float64);
-        print("Answer count: %\n", answers_f64.count);
         if answers_f64.count != pairs.count {
             log_error("Answers has % values, but pairs has %\n", answers_f64.count, pairs.count);
         }
     }
+    profile_block_end("Read answers file");
 
-    begin_haversine_calculations := rdtsc();
+    profile_block_begin("Haversine");
     sum: float64 = 0;
     count := 0;
     success_count := 0;
@@ -112,65 +108,37 @@ main :: () {
             }
         }
     }
+    profile_block_end("Haversine");
 
     average := sum / count;
 
-    begin_free := rdtsc();
+    profile_block_begin("Finalise");
     array_reset(*pairs);
 
-    begin_finalise := rdtsc();
-    total_TSC_taken := begin_finalise - begin_main;
-
     print("----- Calculations -----\n");
+    print("Input file size: % bytes\n", input.count);
     print("Average: %\n", average);
     print("Correct: %/%\n", success_count, count);
+    write_string("\n");
 
     print("----- Timing -----\n");
     print("Estimated CPU frequency: %Hz  (% MHz)\n", cpu_frequency, cpu_frequency/1000_000);
-    PrintTimeElapsed("Startup             ", total_TSC_taken, begin_main, begin_args);
-    PrintTimeElapsed("Arguments           ", total_TSC_taken, begin_args, begin_read);
-    PrintTimeElapsed("Read                ", total_TSC_taken, begin_read, begin_parse);
-    PrintTimeElapsed("Parse               ", total_TSC_taken, begin_parse, begin_read_answers);
-    PrintTimeElapsed("Read_answers        ", total_TSC_taken, begin_read_answers, begin_haversine_calculations);
-    PrintTimeElapsed("Process (haversine) ", total_TSC_taken, begin_haversine_calculations, begin_free);
-    PrintTimeElapsed("Free                ", total_TSC_taken, begin_free, begin_finalise);
-    end := rdtsc();
-    PrintTimeElapsed("Finalise            ", total_TSC_taken, begin_finalise, end);
-    time_end := current_time_monotonic();
-    time_diff := time_end - time_begin;
-    print("Took % seconds\n", formatFloat(to_float64_seconds(time_end - time_begin), trailing_width=3));
-}
+    profile_block_end("Finalise");
 
-PrintTimeElapsed :: (label: string, TotalTSCElapsed: u64, Begin: u64, End: u64) {
-    Elapsed := End - Begin;
-    Percent := 100.0 * (Elapsed.(float64) / TotalTSCElapsed.(float64));
-    Time := 1000.0 * Elapsed.(float64) / cpu_frequency.(float64);
-    print("  % % (%\%) \t%ms\n", label, formatInt(Elapsed, minimum_digits=10, padding=" "), formatFloat(Percent, trailing_width=2), formatFloat(Time, trailing_width=2));
-}
-
-estimate_cpu_frequency :: () -> u64 {
-    start := rdtsc();
-    end: u64;
-    time_begin := current_time_monotonic();
-    time_should_end := time_begin + milliseconds_to_apollo(100);
-    time_end: Apollo_Time;
-    while time_end < time_should_end {
-        time_end = current_time_monotonic();
-        end = rdtsc();
-    }
-    diff_rdtsc := end - start;
-    diff_time := to_float64_seconds(time_end - time_begin);
-    return cast(u64, diff_rdtsc / diff_time);
+    profile_print();
 }
 
 // Remember to free the result!
 parse :: (data: string) -> []Pair, ok: bool {
+    profile_function();
+
     results: [..]Pair;
 
     j: Lexer = json_init(data);
     defer json_free(*j);
 
     parse_pair :: (j: *Lexer, pair: *Pair) {
+        profile_function();
         level := j.stack.count;
         t: Token;
         while json_fetch_next_at_depth(j, *t, level+1) {
@@ -381,6 +349,7 @@ json_next :: (j: *Lexer) -> Token {
 }
 
 json_fetch_until :: (j: *Lexer, type: TokenType, out_token: *Token) -> bool {
+    profile_function();
     t := json_next(j);
     out_token.* = t;
     if t.type == .NONE return false;
@@ -404,6 +373,7 @@ json_fetch_next_at_depth :: (j: *Lexer, out_token: *Token, level: int) -> bool {
 #scope_file
 
 parse_string :: (str: *string) -> string, ok: bool {
+    profile_function();
     assert(str.*[0] == #char "\"", tprint("str should start with a \" but it is: %", slice(str.*, 0, 10)));
     i := 1;
     while true {
@@ -448,6 +418,8 @@ peek_or_default :: (arr: []$T) -> T {
 #import "File";
 #import "String";
 #import "Math";
+#import "Print_Vars";
+#load "profile.jai";
 
 // Profiling
 #import "Machine_X64";
