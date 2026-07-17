@@ -47,10 +47,12 @@ Pair :: struct {
 };
 
 main :: () {
-    estimate_cpu_frequency();
-    profile_begin();
+    Profile.estimate_cpu_frequency();
+    Profile.begin();
 
-    profile_block_begin("Args");
+    PROF: Profile.Region;
+
+    PROF = Profile.block_begin("Args");
     args := get_command_line_arguments();
     input_file: string = "./data_10.json";
     answers_file: string = "./data_10.answers";
@@ -58,15 +60,15 @@ main :: () {
         input_file = args[1];
     }
     answers_file = tprint("%.answers", basename(input_file));
-    profile_block_end("Args");
+    Profile.block_end(PROF);
 
-    profile_block_begin("Read input");
+    PROF = Profile.block_begin("Read input");
     input, ok := read_entire_file(input_file);
     if !ok {
         log_error("Failed to read input file '%'.\n", input_file);
         exit(1);
     }
-    profile_block_end("Read input");
+    Profile.block_end(PROF);
 
     pairs:, ok = parse(input);
     defer array_free(pairs);
@@ -75,7 +77,7 @@ main :: () {
         exit(1);
     }
 
-    profile_block_begin("Read answers file");
+    PROF = Profile.block_begin("Read answers file");
     answers_data:, ok= read_entire_file(answers_file);
     if !ok {
         log("Failed to read answers file %", answers_file);
@@ -88,9 +90,9 @@ main :: () {
             log_error("Answers has % values, but pairs has %\n", answers_f64.count, pairs.count);
         }
     }
-    profile_block_end("Read answers file");
+    Profile.block_end(PROF);
 
-    profile_block_begin("Haversine");
+    PROF = Profile.block_begin("Haversine");
     sum: float64 = 0;
     count := 0;
     success_count := 0;
@@ -99,6 +101,7 @@ main :: () {
         sum += result;
         count += 1;
 
+        Profile.block("Answer calculation");
         if answers_f64.count > it_index {
             reference := answers_f64[it_index];
             if values_are_close(reference, result) {
@@ -108,13 +111,15 @@ main :: () {
             }
         }
     }
-    profile_block_end("Haversine");
+    Profile.block_end(PROF);
 
     average := sum / count;
 
-    profile_block_begin("Finalise");
+    PROF = Profile.block_begin("Free");
     array_reset(*pairs);
+    Profile.block_end(PROF);
 
+    PROF = Profile.block_begin("Printing");
     print("----- Calculations -----\n");
     print("Input file size: % bytes\n", input.count);
     print("Average: %\n", average);
@@ -122,15 +127,15 @@ main :: () {
     write_string("\n");
 
     print("----- Timing -----\n");
-    print("Estimated CPU frequency: %Hz  (% MHz)\n", cpu_frequency, cpu_frequency/1000_000);
-    profile_block_end("Finalise");
+    print("Estimated CPU frequency: %Hz  (% MHz)\n", Profile.cpu_frequency, Profile.cpu_frequency/1000_000);
+    Profile.block_end(PROF);
 
-    profile_print();
+    Profile.end_and_print();
 }
 
 // Remember to free the result!
 parse :: (data: string) -> []Pair, ok: bool {
-    profile_function();
+    Profile.function();
 
     results: [..]Pair;
 
@@ -138,7 +143,6 @@ parse :: (data: string) -> []Pair, ok: bool {
     defer json_free(*j);
 
     parse_pair :: (j: *Lexer, pair: *Pair) {
-        profile_function();
         level := j.stack.count;
         t: Token;
         while json_fetch_next_at_depth(j, *t, level+1) {
@@ -228,6 +232,7 @@ json_next :: (j: *Lexer) -> Token {
         case .parse_key_value; #through;
         case .parse_array_value; #through;
         case .parse_value;
+            Profile.block("json_next.parse_value");
             c := j.remaining[0];
             if c == {
             case "{";
@@ -349,7 +354,6 @@ json_next :: (j: *Lexer) -> Token {
 }
 
 json_fetch_until :: (j: *Lexer, type: TokenType, out_token: *Token) -> bool {
-    profile_function();
     t := json_next(j);
     out_token.* = t;
     if t.type == .NONE return false;
@@ -373,7 +377,7 @@ json_fetch_next_at_depth :: (j: *Lexer, out_token: *Token, level: int) -> bool {
 #scope_file
 
 parse_string :: (str: *string) -> string, ok: bool {
-    profile_function();
+    Profile.function();
     assert(str.*[0] == #char "\"", tprint("str should start with a \" but it is: %", slice(str.*, 0, 10)));
     i := 1;
     while true {
@@ -414,17 +418,14 @@ peek_or_default :: (arr: []$T) -> T {
     return default;
 }
 
+// Sloppy_Math only supports float, not float64, so implement it here.
+values_are_close :: (f0: float64, f1: float64, epsilon := 0.0005) -> bool {
+    return abs(f0-f1) <= epsilon;
+}
+
 #import "Basic";
 #import "File";
 #import "String";
 #import "Math";
 #import "Print_Vars";
-#load "profile.jai";
-
-// Profiling
-#import "Machine_X64";
-
-// Sloppy_Math only supports float, not float64, so implement it here.
-values_are_close :: (f0: float64, f1: float64, epsilon := 0.0005) -> bool {
-    return abs(f0-f1) <= epsilon;
-}
+Profile :: #import,file "Profile.jai"()(enable=true);
