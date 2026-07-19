@@ -68,7 +68,7 @@ main :: () {
         log_error("Failed to read input file '%'.\n", input_file);
         exit(1);
     }
-    Profile.block_end(PROF);
+    Profile.block_end(PROF, input.count);
 
     pairs:, ok = parse(input);
     defer array_free(pairs);
@@ -111,7 +111,7 @@ main :: () {
             }
         }
     }
-    Profile.block_end(PROF);
+    Profile.block_end(PROF, pairs.count*size_of(type_of(pairs.data.*)));
 
     average := sum / count;
 
@@ -135,7 +135,7 @@ main :: () {
 
 // Remember to free the result!
 parse :: (data: string) -> []Pair, ok: bool {
-    Profile.function();
+    Profile.function(data.count);
 
     results: [..]Pair;
 

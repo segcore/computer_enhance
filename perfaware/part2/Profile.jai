@@ -33,19 +33,19 @@ estimate_cpu_frequency :: () -> u64 {
         context.profiling.begin_tsc = rdtsc();
     }
 
-    function :: (loc := #caller_location) #expand {
+    function :: (bytes_processed := 0, loc := #caller_location) #expand {
         name :: #procedure_name();
         // The `defer must be directly within this macro to make it work
         region := block_begin(name, loc);
         `defer {
-            block_end(region, loc);
+            block_end(region, bytes_processed, loc);
         }
     }
 
-    block :: (name: string, loc := #caller_location) #expand {
+    block :: (name: string, bytes_processed := 0, loc := #caller_location) #expand {
         region := block_begin(name, loc);
         `defer {
-            block_end(region, loc);
+            block_end(region, bytes_processed, loc);
         }
     }
 
@@ -82,7 +82,7 @@ estimate_cpu_frequency :: () -> u64 {
         return region;
     }
 
-    block_end :: (region: Region, loc := #caller_location) #expand {
+    block_end :: (region: Region, bytes_processed := 0, loc := #caller_location) #expand {
         elapsed := rdtsc() - region.start_tsc;
         context.profiling.active_index = region.parent_index;
 
@@ -93,6 +93,7 @@ estimate_cpu_frequency :: () -> u64 {
         anchor.tsc_excluding_children += elapsed;
         anchor.tsc_including_children = region.entry_tsc_including_children + elapsed;
         anchor.hit_count += 1;
+        anchor.bytes_processed += bytes_processed;
 
         #if verbose {
             context.profiling.depth -= 1;
@@ -121,12 +122,18 @@ estimate_cpu_frequency :: () -> u64 {
             time_ms_total := 1000.0 * anchor.tsc_including_children.(float64) / cpu_frequency.(float64);
             SPACES :: "                  ";
             name_padding := slice(SPACES, label.count, SPACES.count);
-            print("%0%0 [%]  %\%/%\%  %/% ms\n", label, name_padding,
+            print("%0%0 [%]  %\%/%\%  %/% ms", label, name_padding,
                     formatInt(anchor.hit_count, minimum_digits=7, padding=" "),
                     formatFloat(percent_child, trailing_width=2, width=5, zero_removal=.NO),
                     formatFloat(percent_total, trailing_width=2, width=5, zero_removal=.NO),
                     formatFloat(time_ms_child, trailing_width=2, width=8, zero_removal=.NO),
                     formatFloat(time_ms_total, trailing_width=2, width=8, zero_removal=.NO));
+            if anchor.bytes_processed > 0 {
+                mb := anchor.bytes_processed.(float64) / 1000 / 1000;
+                gbps := mb / time_ms_total;
+                print("  % MB  % GB/s", formatFloat(mb, trailing_width=2), formatFloat(gbps, trailing_width=3));
+            }
+            write_string("\n");
         }
         frame_time_ms := 1000.0 * total_tsc_elapsed.(float64) / cpu_frequency.(float64);
         print(" (total time: % ms)\n", formatFloat(frame_time_ms, trailing_width=2, zero_removal=.NO));
@@ -167,6 +174,7 @@ Anchor :: struct {
     tsc_including_children: u64;
     tsc_excluding_children: u64;
     hit_count: int;
+    bytes_processed: int;
 
     name: string;
 }
