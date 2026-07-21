@@ -25,7 +25,7 @@ Tester_State :: enum {
 }
 
 Repetition_Tester :: struct {
-    target_byte_count: s64;
+    target_byte_count: u64;
     cpu_timer_frequency: u64;
     try_for_time: u64;
     tests_started_at: u64;
@@ -34,27 +34,50 @@ Repetition_Tester :: struct {
     do_print: bool;
     open_count: u64;
     close_count: u64;
-    time_accumulated_on_this_test: u64;
-    bytes_accumulated_on_this_test: s64;
+    accumulated_on_this_test: Repetition_Value;
 
     results: Repetition_Test_Results;
 }
 
-Repetition_Test_Results :: struct {
-    test_count: u64;
-    total_time: u64;
-    max_time: u64;
-    min_time: u64;
+Repetition_Value_Type :: enum {
+    TestCount;
+    CPUTimer;
+    MemPageFaults;
+    ByteCount;
+}
+ET :: Repetition_Value_Type;
+ET_Max :: #run type_info(Repetition_Value_Type).names.count;
+
+Repetition_Value :: struct {
+    E: [ET_Max]u64;
 }
 
-NewTestWave :: (tester: *Repetition_Tester, target_byte_count: s64, cpu_timer_freq: u64, secs_to_try: u64 = 5) {
+Repetition_Test_Results :: struct {
+    total: Repetition_Value;
+    min: Repetition_Value;
+    max: Repetition_Value;
+}
+
+
+
+ReadPageFaultCount :: () -> u64 {
+    usage: rusage;
+    if getrusage(RUSAGE.SELF, *usage) == -1 {
+        log_error("Failed to read page fault count");
+    }
+    faults := usage.ru_minflt + usage.ru_majflt;
+    return xx faults;
+}
+
+
+NewTestWave :: (tester: *Repetition_Tester, target_byte_count: u64, cpu_timer_freq: u64, secs_to_try: u64 = 5) {
     if tester.state == .NONE {
         // Initialise
         tester.state = .TESTING;
         tester.target_byte_count = target_byte_count;
         tester.cpu_timer_frequency = cpu_timer_freq;
         tester.do_print = true;
-        tester.results.min_time = U64_MAX;
+        tester.results.min.E[ET.CPUTimer] = U64_MAX;
     } else if tester.state == .DONE {
         // Verify correct values, then re-initialise
         tester.state = .TESTING;
@@ -70,11 +93,13 @@ NewTestWave :: (tester: *Repetition_Tester, target_byte_count: s64, cpu_timer_fr
 
 BeginTime :: (tester: *Repetition_Tester) {
     tester.open_count += 1;
-    tester.time_accumulated_on_this_test -= rdtsc();
+    tester.accumulated_on_this_test.E[ET.CPUTimer] -= rdtsc();
+    tester.accumulated_on_this_test.E[ET.MemPageFaults] -= ReadPageFaultCount();
 }
 EndTime :: (tester: *Repetition_Tester) {
     tester.close_count += 1;
-    tester.time_accumulated_on_this_test += rdtsc();
+    tester.accumulated_on_this_test.E[ET.CPUTimer] += rdtsc();
+    tester.accumulated_on_this_test.E[ET.MemPageFaults] += ReadPageFaultCount();
 }
 IsTesting :: (tester: *Repetition_Tester) -> bool {
     if tester.state == .TESTING {
@@ -83,36 +108,40 @@ IsTesting :: (tester: *Repetition_Tester) -> bool {
             if tester.open_count != tester.close_count {
                 Error(tester, "Opened % but closed % - bad.", tester.open_count, tester.close_count);
             }
-            if tester.bytes_accumulated_on_this_test != tester.target_byte_count {
-                Error(tester, "Bytes mismatch. Got %, expected %", tester.bytes_accumulated_on_this_test, tester.target_byte_count);
+
+            accumulator := *tester.accumulated_on_this_test;
+            if accumulator.E[ET.ByteCount] != tester.target_byte_count {
+                Error(tester, "Bytes mismatch. Got %, expected %", accumulator.E[ET.ByteCount], tester.target_byte_count);
             }
 
             // Error may adjust the state since last check
             if tester.state == .TESTING {
                 results := *tester.results;
-                elapsed_time := tester.time_accumulated_on_this_test;
-                results.test_count += 1;
-                results.total_time += elapsed_time;
-                if elapsed_time > results.max_time  results.max_time = elapsed_time;
-                if elapsed_time < results.min_time {
-                    results.min_time = elapsed_time;
+                accumulator.E[ET.TestCount] = 1;
+                for 0..ET_Max-1 {
+                    results.total.E[it] += accumulator.E[it];
+                }
+
+                elapsed_time := accumulator.E[ET.CPUTimer];
+                if elapsed_time > results.max.E[ET.CPUTimer] then results.max = accumulator.*;
+                if elapsed_time < results.min.E[ET.CPUTimer] {
+                    results.min = accumulator.*;
                     // Reset timer to attempt to get new better times
                     tester.tests_started_at = now;
 
                     if tester.do_print {
-                        PrintTime("Min", results.min_time, tester.cpu_timer_frequency, tester.bytes_accumulated_on_this_test);
-                        print("                 \r");
+                        PrintValue("Min", results.min, tester.cpu_timer_frequency);
+                        print("                                                             \r");
                     }
                 }
 
                 tester.open_count = 0;
                 tester.close_count = 0;
-                tester.time_accumulated_on_this_test = 0;
-                tester.bytes_accumulated_on_this_test = 0;
+                accumulator.* = .{};
 
                 if now - tester.tests_started_at > tester.try_for_time {
                     tester.state = .DONE;
-                    print("                                                           \r");
+                    print("                                                                           \r");
                     PrintResults(tester.results, tester.cpu_timer_frequency, tester.target_byte_count);
                 }
             }
@@ -121,25 +150,49 @@ IsTesting :: (tester: *Repetition_Tester) -> bool {
 
     return tester.state == .TESTING;
 }
-CountBytes :: (tester: *Repetition_Tester, count: s64) {
-    tester.bytes_accumulated_on_this_test += count;
+CountBytes :: (tester: *Repetition_Tester, count: u64) {
+    tester.accumulated_on_this_test.E[ET.ByteCount] += count;
 }
 Error :: (tester: *Repetition_Tester, format: string, args: ..Any) {
     log_error(format, ..args);
     tester.state = .ERROR;
 } @PrintLike
 
-PrintTime :: (label: string, tsc: u64, cpu_timer_freq: u64, byte_count: int, newline := false) {
-    time_secs := tsc.(float64) / cpu_timer_freq;
-    gbps := byte_count.(float64) / 1.0e9 / time_secs;
-    print("%  %ms  (% Gb/s)", label, formatFloat(time_secs*1000, trailing_width=1, zero_removal=.NO), gbps);
+PrintValue :: (label: string, value: Repetition_Value, cpu_timer_freq: u64, newline := false) {
+    test_count : float64 = xx value.E[ET.TestCount];
+    if test_count == 0 test_count = 1.0;
+
+    E: [ET_Max]float64;
+    for 0..ET_Max-1 {
+        E[it] = value.E[it].(float64) / test_count;
+    }
+
+    write_string(label);
+
+    cpu_time := E[ET.CPUTimer];
+    if cpu_timer_freq {
+        time_secs := cpu_time / cpu_timer_freq;
+        print("  %ms", formatFloat(time_secs*1000, trailing_width=1, zero_removal=.NO));
+
+        byte_count := E[ET.ByteCount];
+        if byte_count {
+            gbps := byte_count / 1.0e9 / time_secs;
+            print("  (% Gb/s)", gbps);
+        }
+    }
+
+    if E[ET.MemPageFaults] {
+        print("  % faults (%k/fault)", E[ET.MemPageFaults], formatFloat(E[ET.ByteCount] / 1000 / E[ET.MemPageFaults], trailing_width=1));
+    }
+
     if newline write_string("\n");
 }
-PrintResults :: (results: Repetition_Test_Results, cpu_timer_frequency: u64, target_byte_count: int) {
-    average_time := results.total_time / results.test_count;
-    PrintTime("Min", results.min_time, cpu_timer_frequency, target_byte_count, newline=true);
-    PrintTime("Avg", average_time,     cpu_timer_frequency, target_byte_count, newline=true);
-    PrintTime("Max", results.max_time, cpu_timer_frequency, target_byte_count, newline=true);
+
+PrintResults :: (results: Repetition_Test_Results, cpu_timer_frequency: u64, target_byte_count: u64) {
+    average_time := results.total.E[ET.CPUTimer].(float64) / results.total.E[ET.TestCount];
+    PrintValue("Min", results.min, cpu_timer_frequency, newline=true);
+    PrintValue("Max", results.max, cpu_timer_frequency, newline=true);
+    PrintValue("Avg", results.total, cpu_timer_frequency, newline=true);
 }
 
 
@@ -180,7 +233,7 @@ read_with_posix_read :: (tester: *Repetition_Tester, params: Read_Parameters) {
                     Error(tester, "posix read failed");
                     break;
                 } else {
-                    CountBytes(tester, result);
+                    CountBytes(tester, xx result);
                     remaining = array_view(remaining, result);
                 }
             }
@@ -205,7 +258,7 @@ read_with_fread :: (tester: *Repetition_Tester, params: Read_Parameters) {
             EndTime(tester);
 
             if result == 1 {
-                CountBytes(tester, buffer.count);
+                CountBytes(tester, xx buffer.count);
             } else {
                 Error(tester, "fread failed");
             }
@@ -257,7 +310,7 @@ main :: () {
                 test_function := test_functions[func_index];
 
                 print("\n--- %0 + %0 ---\n", cast(AllocType, alloc_type), test_function.name);
-                NewTestWave(tester, params.buffer.count, cpu_timer_frequency);
+                NewTestWave(tester, xx params.buffer.count, cpu_timer_frequency);
                 test_function.function(tester, params);
             }
         }
