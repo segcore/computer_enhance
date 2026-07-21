@@ -5,9 +5,16 @@
 #import "Math";
 Profile :: #import,file "Profile.jai"()(enable=true);
 
+AllocType :: enum {
+    None;
+    NewArray;
+    NewArrayInitialised;
+}
+
 Read_Parameters :: struct {
     buffer: []u8;
     file_name: string;
+    alloc_type: AllocType;
 }
 
 Tester_State :: enum {
@@ -135,12 +142,33 @@ PrintResults :: (results: Repetition_Test_Results, cpu_timer_frequency: u64, tar
     PrintTime("Max", results.max_time, cpu_timer_frequency, target_byte_count, newline=true);
 }
 
+
+MaybeAllocate :: (params: Read_Parameters, buffer: *[]u8) {
+    if #complete params.alloc_type == {
+    case .None;
+    case .NewArray;
+        buffer.* = NewArray(buffer.count, u8, initialized=false);
+    case .NewArrayInitialised;
+        buffer.* = NewArray(buffer.count, u8, initialized=true);
+    }
+}
+
+MaybeDeallocate :: (params: Read_Parameters, buffer: *[]u8) {
+    if #complete params.alloc_type == {
+    case .None;
+    case .NewArray; #through;
+    case .NewArrayInitialised;
+        array_reset(buffer);
+    }
+}
+
 read_with_posix_read :: (tester: *Repetition_Tester, params: Read_Parameters) {
     while IsTesting(tester) {
         assert(params.file_name.data[params.file_name.count] == 0, "File name is not null terminated!");
         fd := open(params.file_name.data, O_RDONLY);
         if fd >= 0 {
             buffer := params.buffer;
+            MaybeAllocate(params, *buffer);
 
             remaining := buffer;
             while remaining {
@@ -157,6 +185,7 @@ read_with_posix_read :: (tester: *Repetition_Tester, params: Read_Parameters) {
                 }
             }
 
+            MaybeDeallocate(params, *buffer);
             close(fd);
         } else {
             Error(tester, "fopen failed");
@@ -169,6 +198,7 @@ read_with_fread :: (tester: *Repetition_Tester, params: Read_Parameters) {
         fp := fopen(params.file_name.data, "rb");
         if fp {
             buffer := params.buffer;
+            MaybeAllocate(params, *buffer);
 
             BeginTime(tester);
             result := fread(buffer.data, xx buffer.count, 1, fp);
@@ -180,6 +210,7 @@ read_with_fread :: (tester: *Repetition_Tester, params: Read_Parameters) {
                 Error(tester, "fread failed");
             }
 
+            MaybeDeallocate(params, *buffer);
             fclose(fp);
         } else {
             Error(tester, "fopen failed");
@@ -217,14 +248,18 @@ main :: () {
     params.file_name = path;
 
     cpu_timer_frequency := Profile.estimate_cpu_frequency();
-    testers: [test_functions.count]Repetition_Tester;
+    testers: [test_functions.count][#run type_info(AllocType).names.count]Repetition_Tester;
     while true {
-        for* tester: testers {
-            test_function := test_functions[it_index];
+        for* func_array, func_index: testers {
+            for alloc_type: enum_values_as_s64(AllocType) {
+                params.alloc_type = xx alloc_type;
+                tester := *func_array.*[alloc_type];
+                test_function := test_functions[func_index];
 
-            print("\n--- % ---\n", test_function.name);
-            NewTestWave(tester, params.buffer.count, cpu_timer_frequency);
-            test_function.function(tester, params);
+                print("\n--- %0 + %0 ---\n", cast(AllocType, alloc_type), test_function.name);
+                NewTestWave(tester, params.buffer.count, cpu_timer_frequency);
+                test_function.function(tester, params);
+            }
         }
     }
 }
