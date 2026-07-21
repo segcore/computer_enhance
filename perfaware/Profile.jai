@@ -4,11 +4,11 @@ verbose :: false; // debug this module
 
 cpu_frequency: u64;
 
-estimate_cpu_frequency :: () -> u64 {
+estimate_cpu_frequency :: (millis := 100) -> u64 {
     start := rdtsc();
     end: u64;
     time_begin := current_time_monotonic();
-    time_should_end := time_begin + milliseconds_to_apollo(100);
+    time_should_end := time_begin + milliseconds_to_apollo(millis);
     time_end: Apollo_Time;
     while time_end < time_should_end {
         time_end = current_time_monotonic();
