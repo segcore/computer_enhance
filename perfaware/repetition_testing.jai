@@ -3,13 +3,23 @@
 #import "Machine_X64";
 #import "POSIX";
 #import "Math";
+#import "System";
+#import "Print_Vars";
 Profile :: #import,file "Profile.jai"()(enable=true);
 
 AllocType :: enum {
     None;
     NewArray;
     NewArrayInitialised;
+    Mmap_default; // may use transparent-huge-pages
+    Mmap_transparent_huge; // force-on use transparent-huge-pages
+    Mmap_4kb; // force-off transparent huge pages
+    Mmap_4kb_sequential;
+    Mmap_2mb;
+    Mmap_2mb_sequential;
+    Mmap_1gb;
 }
+allocation_failed: [#run type_info(AllocType).names.count]bool;
 
 Read_Parameters :: struct {
     buffer: []u8;
@@ -182,7 +192,7 @@ PrintValue :: (label: string, value: Repetition_Value, cpu_timer_freq: u64, newl
     }
 
     if E[ET.MemPageFaults] {
-        print("  % faults (%k/fault)", E[ET.MemPageFaults], formatFloat(E[ET.ByteCount] / 1000 / E[ET.MemPageFaults], trailing_width=1));
+        print("  % faults (%k/fault)", E[ET.MemPageFaults], formatFloat(E[ET.ByteCount] / 1024 / E[ET.MemPageFaults], trailing_width=1));
     }
 
     if newline write_string("\n");
@@ -196,14 +206,72 @@ PrintResults :: (results: Repetition_Test_Results, cpu_timer_frequency: u64, tar
 }
 
 
-MaybeAllocate :: (params: Read_Parameters, buffer: *[]u8) {
+MaybeAllocate :: (params: Read_Parameters, buffer: *[]u8) -> ok: bool {
+    do_mmap := false;
+    mmap_flags: s32 = 0;
+    madvice: s32 = 0;
+
+    if allocation_failed[params.alloc_type] return false;
+
     if #complete params.alloc_type == {
     case .None;
     case .NewArray;
         buffer.* = NewArray(buffer.count, u8, initialized=false);
     case .NewArrayInitialised;
         buffer.* = NewArray(buffer.count, u8, initialized=true);
+
+    case .Mmap_default;
+        do_mmap = true;
+        mmap_flags = 0;
+
+    case .Mmap_transparent_huge;
+        do_mmap = true;
+        mmap_flags = 0;
+        madvice = MADV_HUGEPAGE;
+
+    case .Mmap_4kb;
+        do_mmap = true;
+        mmap_flags = 0;
+        madvice = MADV_NOHUGEPAGE;
+
+    case .Mmap_4kb_sequential;
+        do_mmap = true;
+        mmap_flags = 0;
+        madvice = MADV_NOHUGEPAGE | MADV_SEQUENTIAL;
+
+    case .Mmap_2mb;
+        do_mmap = true;
+        mmap_flags = MAP_HUGETLB | (21 << MAP_HUGE_SHIFT);
+
+    case .Mmap_2mb_sequential;
+        do_mmap = true;
+        mmap_flags = MAP_HUGETLB | (21 << MAP_HUGE_SHIFT) | MADV_SEQUENTIAL;
+
+    case .Mmap_1gb;
+        do_mmap = true;
+        mmap_flags = MAP_HUGETLB | (30 << MAP_HUGE_SHIFT);
     }
+
+    if do_mmap {
+        pagesize := mmap_size(params.alloc_type);
+        rounded := mmap_rounded(buffer.count, pagesize);
+        memory := mmap(null, rounded, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | mmap_flags, -1, 0);
+        if memory == MAP_FAILED {
+            errno, errstring := get_error_value_and_string();
+            log_error("Failed to map memory: %. pagesize: %, rounded: % -> %", errstring, pagesize, buffer.count, rounded);
+            allocation_failed[params.alloc_type] = false;
+            return false;
+        }
+
+        if madvice != 0 {
+            if madvise(memory, rounded, madvice) != 0 {
+            errno, errstring := get_error_value_and_string();
+                log_error("madvice failed for %: %", params.alloc_type, errstring);
+            }
+        }
+        buffer.data = memory;
+    }
+    return true;
 }
 
 MaybeDeallocate :: (params: Read_Parameters, buffer: *[]u8) {
@@ -212,7 +280,47 @@ MaybeDeallocate :: (params: Read_Parameters, buffer: *[]u8) {
     case .NewArray; #through;
     case .NewArrayInitialised;
         array_reset(buffer);
+    case .Mmap_default; #through;
+    case .Mmap_transparent_huge; #through;
+    case .Mmap_4kb; #through;
+    case .Mmap_4kb_sequential; #through;
+    case .Mmap_2mb; #through;
+    case .Mmap_2mb_sequential; #through;
+    case .Mmap_1gb;
+        rounded := mmap_rounded(buffer.count, mmap_size(params.alloc_type));
+        result := munmap(buffer.data, rounded);
+        if result == -1 {
+            log_error("Failed to unmap data % with raw size % and rounded size % (%mb): %", buffer.data, buffer.count, rounded, rounded / 1024.0/1024.0, get_error_string(get_error_value()));
+        }
     }
+}
+
+mmap_size :: (type: AllocType) -> u64 {
+    if type == {
+    case .Mmap_default; #through;
+    case .Mmap_transparent_huge; #through;
+    case .Mmap_4kb; #through;
+    case .Mmap_4kb_sequential;
+        return xx sysconf(._SC_PAGESIZE);
+    case .Mmap_2mb; #through;
+    case .Mmap_2mb_sequential;
+        return 2*1024*1024;
+    case .Mmap_1gb;
+        return 1*1024*1024*1024;
+    }
+    assert(false, "Bad alloc type: %", type);
+    return 0;
+}
+mmap_rounded :: (len: s64, pagesize: u64) -> u64 {
+    rounded := round_up(xx len, pagesize);
+    return rounded;
+}
+
+round_down :: (value: u64, pagesize: u64) -> u64 {
+    return value & ~(pagesize - 1);
+}
+round_up :: (value: u64, pagesize: u64) -> u64 {
+    return round_down(value + pagesize - 1, pagesize);
 }
 
 read_with_posix_read :: (tester: *Repetition_Tester, params: Read_Parameters) {
@@ -221,24 +329,26 @@ read_with_posix_read :: (tester: *Repetition_Tester, params: Read_Parameters) {
         fd := open(params.file_name.data, O_RDONLY);
         if fd >= 0 {
             buffer := params.buffer;
-            MaybeAllocate(params, *buffer);
+            if MaybeAllocate(params, *buffer) {
+                remaining := buffer;
+                while remaining {
+                    BeginTime(tester);
+                    result := read(fd, remaining.data, xx remaining.count);
+                    EndTime(tester);
 
-            remaining := buffer;
-            while remaining {
-                BeginTime(tester);
-                result := read(fd, remaining.data, xx remaining.count);
-                EndTime(tester);
-
-                if result < 0 {
-                    Error(tester, "posix read failed");
-                    break;
-                } else {
-                    CountBytes(tester, xx result);
-                    remaining = array_view(remaining, result);
+                    if result < 0 {
+                        Error(tester, "posix read failed");
+                        break;
+                    } else {
+                        CountBytes(tester, xx result);
+                        remaining = array_view(remaining, result);
+                    }
                 }
-            }
 
-            MaybeDeallocate(params, *buffer);
+                MaybeDeallocate(params, *buffer);
+            } else {
+                Error(tester, "Cannot allocate with %", params.alloc_type);
+            }
             close(fd);
         } else {
             Error(tester, "fopen failed");
@@ -251,19 +361,21 @@ read_with_fread :: (tester: *Repetition_Tester, params: Read_Parameters) {
         fp := fopen(params.file_name.data, "rb");
         if fp {
             buffer := params.buffer;
-            MaybeAllocate(params, *buffer);
+            if MaybeAllocate(params, *buffer) {
+                BeginTime(tester);
+                result := fread(buffer.data, xx buffer.count, 1, fp);
+                EndTime(tester);
 
-            BeginTime(tester);
-            result := fread(buffer.data, xx buffer.count, 1, fp);
-            EndTime(tester);
+                if result == 1 {
+                    CountBytes(tester, xx buffer.count);
+                } else {
+                    Error(tester, "fread failed");
+                }
 
-            if result == 1 {
-                CountBytes(tester, xx buffer.count);
+                MaybeDeallocate(params, *buffer);
             } else {
-                Error(tester, "fread failed");
+                Error(tester, "Cannot allocate with %", params.alloc_type);
             }
-
-            MaybeDeallocate(params, *buffer);
             fclose(fp);
         } else {
             Error(tester, "fopen failed");
@@ -310,7 +422,7 @@ main :: () {
                 test_function := test_functions[func_index];
 
                 print("\n--- %0 + %0 ---\n", cast(AllocType, alloc_type), test_function.name);
-                NewTestWave(tester, xx params.buffer.count, cpu_timer_frequency);
+                NewTestWave(tester, xx params.buffer.count, cpu_timer_frequency, 3);
                 test_function.function(tester, params);
             }
         }
