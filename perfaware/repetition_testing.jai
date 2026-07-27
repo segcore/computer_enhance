@@ -10,10 +10,11 @@ Profile :: #import,file "Profile.jai"()(enable=true);
 AllocType :: enum {
     None;
     NewArray;
-    NewArrayInitialised;
     Mmap_default; // may use transparent-huge-pages
-    Mmap_transparent_huge; // force-on use transparent-huge-pages
     Mmap_4kb; // force-off transparent huge pages
+    _test_to_here;
+    NewArrayInitialised;
+    Mmap_transparent_huge; // force-on use transparent-huge-pages
     Mmap_4kb_sequential;
     Mmap_2mb;
     Mmap_2mb_sequential;
@@ -215,6 +216,7 @@ MaybeAllocate :: (params: Read_Parameters, buffer: *[]u8) -> ok: bool {
 
     if #complete params.alloc_type == {
     case .None;
+    case ._test_to_here;
     case .NewArray;
         buffer.* = NewArray(buffer.count, u8, initialized=false);
     case .NewArrayInitialised;
@@ -292,6 +294,7 @@ MaybeDeallocate :: (params: Read_Parameters, buffer: *[]u8) {
         if result == -1 {
             log_error("Failed to unmap data % with raw size % and rounded size % (%mb): %", buffer.data, buffer.count, rounded, rounded / 1024.0/1024.0, get_error_string(get_error_value()));
         }
+    case ._test_to_here;
     }
 }
 
@@ -355,6 +358,7 @@ read_with_posix_read :: (tester: *Repetition_Tester, params: Read_Parameters) {
         }
     }
 }
+
 read_with_fread :: (tester: *Repetition_Tester, params: Read_Parameters) {
     while IsTesting(tester) {
         assert(params.file_name.data[params.file_name.count] == 0, "File name is not null terminated!");
@@ -383,11 +387,51 @@ read_with_fread :: (tester: *Repetition_Tester, params: Read_Parameters) {
     }
 }
 
+read_with_mmap :: (tester: *Repetition_Tester, params: Read_Parameters) {
+    if params.alloc_type != .None then return;
+
+    while IsTesting(tester) {
+        assert(params.file_name.data[params.file_name.count] == 0, "File name is not null terminated!");
+        fd := open(params.file_name.data, O_RDONLY);
+        if fd >= 0 {
+            pagesize := mmap_size(AllocType.Mmap_4kb);
+            length := mmap_rounded(params.buffer.count, pagesize);
+            BeginTime(tester);
+            memory := mmap(null, length, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
+            EndTime(tester);
+            if memory == MAP_FAILED {
+                Error(tester, "mmap failed");
+            } else {
+                buffer := params.buffer;
+                buffer.data = memory;
+
+                // Force faults
+                // mlock() seems to fail (shrug)
+                count: s64 = buffer.count/pagesize.(s64) + 1;
+                mydata := NewArray(count, u8, initialized=true);
+                defer array_free(mydata);
+                BeginTime(tester);
+                for 0..count-1 {
+                    mydata[it] = buffer[it*cast,no_check(s64, pagesize)];
+                }
+                EndTime(tester);
+                // print("Sample bytes: % bytes are %\n", mydata.count, mydata);
+
+                CountBytes(tester, xx buffer.count);
+            }
+            close(fd);
+        } else {
+            Error(tester, "fopen failed");
+        }
+    }
+}
+
 TestFunction :: struct {
     name: string;
     function: (tester: *Repetition_Tester, params: Read_Parameters);
 }
 test_functions :: TestFunction.[
+    .{ "mmap(fd)", read_with_mmap },
     .{ "posix_read", read_with_posix_read },
     .{ "fread", read_with_fread },
 ];
@@ -397,7 +441,7 @@ main :: () {
     if args.count < 2 {
         print("Please provide a file to read\n");
         // exit(1);
-        args = .[args[0], "data_1000000.json"];
+        args = .[args[0], "data_10000000.json"];
     }
     path := args[1];
 
@@ -413,10 +457,10 @@ main :: () {
     params.file_name = path;
 
     cpu_timer_frequency := Profile.estimate_cpu_frequency();
-    testers: [test_functions.count][#run type_info(AllocType).names.count]Repetition_Tester;
+    testers: [test_functions.count][AllocType._test_to_here]Repetition_Tester;
     while true {
         for* func_array, func_index: testers {
-            for alloc_type: enum_values_as_s64(AllocType) {
+            for alloc_type: 0..AllocType._test_to_here-1 {
                 params.alloc_type = xx alloc_type;
                 tester := *func_array.*[alloc_type];
                 test_function := test_functions[func_index];
