@@ -27,13 +27,14 @@ section .text
 ; To use these on a platform with a different ABI, you would have to
 ; change those registers to match the ABI.
 ;
+; For linux, parameter count=rdi, pointer=rsi
 
 NOP3x1AllBytes:
     xor rax, rax
 .loop:
     db 0x0f, 0x1f, 0x00 ; NOTE(casey): This is the byte sequence for a 3-byte NOP
     inc rax
-    cmp rax, rcx
+    cmp rax, rdi
     jb .loop
     ret
 
@@ -44,7 +45,7 @@ NOP1x3AllBytes:
     nop
     nop
     inc rax
-    cmp rax, rcx
+    cmp rax, rdi
     jb .loop
     ret
 
@@ -61,6 +62,6 @@ NOP1x9AllBytes:
     nop
     nop
     inc rax
-    cmp rax, rcx
+    cmp rax, rdi
     jb .loop
     ret

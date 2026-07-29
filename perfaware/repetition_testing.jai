@@ -124,27 +124,42 @@ write_to_all_bytes :: (tester: *Repetition_Tester, params: Read_Parameters) {
 
 #run {
     C :: #import "Compiler";
-    C.set_build_options_dc(.{append_linker_arguments=.["part3/listing_0132_nop_loop.o"]});
+    object_files: [..]string;
 
-    #if 1 {
-        // Build the .o file
+    // Build the .o files
+    assemble :: (path: string) #expand {
         P :: #import "Process";
-        result := P.run_command("nasm", "-f", "elf64", "./part3/listing_0132_nop_loop.asm", "-o", "part3/listing_0132_nop_loop.o");
+        result := P.run_command("nasm", "-f", "elf64", tprint("%.asm", path));
         if result.exit_code != 0 {
-            log_error("Failed to compile assembly. %", result);
+            log_error("Failed to compile assembly at '%'. %", path, result);
             C.compiler_report("Failed to compile required assembly file");
         }
+        array_add(*object_files, tprint("%.o", path));
     }
+    assemble("./part3/listing_0132_nop_loop");
+    assemble("./part3/listing_0134_multinop_loops");
+
+    C.set_build_options_dc(.{append_linker_arguments=object_files});
 }
+
+// 132
 MOVAllBytesASM :: (count: u64, data: *void) #foreign;
 NOPAllBytesASM :: (count: u64, data: *void) #foreign;
 CMPAllBytesASM :: (count: u64, data: *void) #foreign;
 DECAllBytesASM :: (count: u64, data: *void) #foreign;
-
 TestAsmMOV :: #bake_arguments TestAsm(func=MOVAllBytesASM);
 TestAsmNOP :: #bake_arguments TestAsm(func=NOPAllBytesASM);
 TestAsmCMP :: #bake_arguments TestAsm(func=CMPAllBytesASM);
 TestAsmDEC :: #bake_arguments TestAsm(func=DECAllBytesASM);
+
+// 134
+NOP3x1AllBytes :: (count: u64, data: *void) #foreign;
+NOP1x3AllBytes :: (count: u64, data: *void) #foreign;
+NOP1x9AllBytes :: (count: u64, data: *void) #foreign;
+Test_NOP3x1 :: #bake_arguments TestAsm(func=NOP3x1AllBytes);
+Test_NOP1x3 :: #bake_arguments TestAsm(func=NOP1x3AllBytes);
+Test_NOP1x9 :: #bake_arguments TestAsm(func=NOP1x9AllBytes);
+
 TestAsm :: (tester: *Repetition_Tester, params: Read_Parameters, $func: (u64, *void) #c_call) {
     while IsTesting(tester) {
         buffer := params.buffer;
@@ -164,10 +179,13 @@ TestFunction :: struct {
     function: (tester: *Repetition_Tester, params: Read_Parameters);
 }
 test_functions :: TestFunction.[
-    .{ "TestAsmMOV", TestAsmMOV },
-    .{ "TestAsmNOP", TestAsmNOP },
-    .{ "TestAsmCMP", TestAsmCMP },
-    .{ "TestAsmDEC", TestAsmDEC },
+    .{ "Test_NOP1x3", Test_NOP1x3 },
+    .{ "Test_NOP3x1", Test_NOP3x1 },
+    .{ "Test_NOP1x9", Test_NOP1x9 },
+    // .{ "TestAsmMOV", TestAsmMOV },
+    // .{ "TestAsmNOP", TestAsmNOP },
+    // .{ "TestAsmCMP", TestAsmCMP },
+    // .{ "TestAsmDEC", TestAsmDEC },
     // .{ "write_to_all_bytes", write_to_all_bytes },
     // .{ "mmap(fd)", read_with_mmap },
     // .{ "posix_read", read_with_posix_read },
