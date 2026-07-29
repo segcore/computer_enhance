@@ -46,6 +46,34 @@ Pair :: struct {
     b: LatLon;
 };
 
+mmap_file :: (path: string) -> content: string, ok: bool {
+    round_down :: (value: u64, pagesize: u64) -> u64 {
+        return value & ~(pagesize - 1);
+    }
+    round_up :: (value: u64, pagesize: u64) -> u64 {
+        return round_down(value + pagesize - 1, pagesize);
+    }
+    Sys :: #import "System";
+    using Posix :: #import "POSIX";
+    pagesize := Posix.sysconf(._SC_PAGESIZE);
+    info: stat_t;
+    stat(path.data, *info);
+    filesize := info.st_size;
+    length := round_up(xx filesize, xx pagesize);
+
+    fd := open(path.data, O_RDONLY);
+    memory := mmap(null, length, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
+    close(fd);
+
+    if memory == MAP_FAILED {
+        log_error("Failed to map file %", path);
+        return "", false;
+    } else {
+        result := string.{data=memory, count=filesize};
+        return result, true;
+    }
+}
+
 main :: () {
     Profile.estimate_cpu_frequency();
     Profile.begin();
@@ -64,6 +92,7 @@ main :: () {
 
     PROF = Profile.block_begin("Read input");
     input, ok := read_entire_file(input_file);
+    // input, ok := mmap_file(input_file);
     if !ok {
         log_error("Failed to read input file '%'.\n", input_file);
         exit(1);
@@ -71,6 +100,7 @@ main :: () {
     Profile.block_end(PROF, input.count);
 
     pairs:, ok = parse(input);
+    // pairs:, ok = []Pair.{}, true; // parse(input);
     defer array_free(pairs);
     if !ok {
         log_error("Failed to parse input from '%'", input_file);
@@ -232,7 +262,7 @@ json_next :: (j: *Lexer) -> Token {
         case .parse_key_value; #through;
         case .parse_array_value; #through;
         case .parse_value;
-            Profile.block("json_next.parse_value");
+            // Profile.block("json_next.parse_value");
             c := j.remaining[0];
             if c == {
             case "{";
@@ -377,7 +407,7 @@ json_fetch_next_at_depth :: (j: *Lexer, out_token: *Token, level: int) -> bool {
 #scope_file
 
 parse_string :: (str: *string) -> string, ok: bool {
-    Profile.function();
+    // Profile.function();
     assert(str.*[0] == #char "\"", tprint("str should start with a \" but it is: %", slice(str.*, 0, 10)));
     i := 1;
     while true {
